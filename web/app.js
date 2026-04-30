@@ -2,6 +2,7 @@ const form = document.querySelector('#generateForm');
 const promptInput = document.querySelector('#prompt');
 const styleInput = document.querySelector('#style');
 const sizeInput = document.querySelector('#size');
+const imageCountInput = document.querySelector('#imageCount');
 const imageModelInput = document.querySelector('#imageModel');
 const referenceInput = document.querySelector('#referenceImage');
 const referencePreview = document.querySelector('#referencePreview');
@@ -10,9 +11,11 @@ const message = document.querySelector('#message');
 const statusTitle = document.querySelector('#statusTitle');
 const preview = document.querySelector('#preview');
 const openImage = document.querySelector('#openImage');
+const hdImage = document.querySelector('#hdImage');
 const enhancedPromptText = document.querySelector('#enhancedPromptText');
 const refineFeedback = document.querySelector('#refineFeedback');
 const refineButton = document.querySelector('#refineButton');
+const refineImageHint = document.querySelector('#refineImageHint');
 const historyList = document.querySelector('#historyList');
 const refreshHistory = document.querySelector('#refreshHistory');
 const loginGate = document.querySelector('#loginGate');
@@ -30,10 +33,14 @@ let pollingTimer = null;
 let referencePreviewUrls = [];
 let selectedFiles = [];
 let currentTask = null;
+let selectedRefineImageUrl = '';
+let isPreviewZoomed = false;
 const MAX_REFERENCE_FILE_SIZE = 5 * 1024 * 1024;
 const MAX_REFERENCE_COUNT = 4;
 const AUTH_STORAGE_KEY = 'textImagesAuthToken';
 const AUTH_EXPIRES_IN_MS = 7 * 24 * 60 * 60 * 1000;
+const IMAGE_COUNT_OPTIONS = new Set([1, 2, 4, 8]);
+let selectedHistoryTaskId = '';
 
 function getAuthToken() {
   const raw = localStorage.getItem(AUTH_STORAGE_KEY);
@@ -236,6 +243,105 @@ function formatImageUrl(url) {
   return url;
 }
 
+function getTaskImageUrls(task) {
+  const fromArray = Array.isArray(task?.imageUrls)
+    ? task.imageUrls.map((url) => formatImageUrl(url)).filter(Boolean)
+    : [];
+  if (fromArray.length > 0) {
+    return fromArray;
+  }
+  const single = formatImageUrl(task?.imageUrl);
+  return single ? [single] : [];
+}
+
+function updateRefineImageHint(task, selectedUrl = '') {
+  if (!refineImageHint) {
+    return;
+  }
+  const urls = getTaskImageUrls(task);
+  if (urls.length === 0) {
+    refineImageHint.textContent = '当前无可用于继续调整的图片。';
+    return;
+  }
+  if (urls.length === 1) {
+    refineImageHint.textContent = '当前只有 1 张图片，将基于该图继续调整。';
+    return;
+  }
+  const selectedIndex = urls.findIndex((url) => url === selectedUrl);
+  if (selectedIndex >= 0) {
+    refineImageHint.textContent = `已选择第 ${selectedIndex + 1} 张作为继续调整基准图。`;
+  } else {
+    refineImageHint.textContent = `当前有 ${urls.length} 张图片，请先点击选中一张再继续调整。`;
+  }
+}
+
+function updateRefineButtonText(task, selectedUrl = '') {
+  if (!refineButton) {
+    return;
+  }
+  const urls = getTaskImageUrls(task);
+  if (urls.length <= 1) {
+    refineButton.textContent = '基于当前结果继续调整';
+    return;
+  }
+  const selectedIndex = urls.findIndex((url) => url === selectedUrl);
+  if (selectedIndex >= 0) {
+    refineButton.textContent = `基于第 ${selectedIndex + 1} 张继续调整`;
+    return;
+  }
+  refineButton.textContent = '请先选择一张图片再继续调整';
+}
+
+function selectPreviewImageByIndex(index) {
+  if (!currentTask) {
+    return false;
+  }
+  const urls = getTaskImageUrls(currentTask);
+  if (urls.length <= 1) {
+    return false;
+  }
+  if (index < 0 || index >= urls.length) {
+    return false;
+  }
+  const targetUrl = urls[index];
+  const targetImg = preview.querySelector(`img.selectable[data-image-url="${CSS.escape(targetUrl)}"]`);
+  if (!targetImg) {
+    return false;
+  }
+  selectedRefineImageUrl = targetUrl;
+  preview.querySelectorAll('img.selectable').forEach((n) => n.classList.remove('selected'));
+  targetImg.classList.add('selected');
+  updateRefineImageHint(currentTask, selectedRefineImageUrl);
+  updateRefineButtonText(currentTask, selectedRefineImageUrl);
+  setMessage(`已通过快捷键选择第 ${index + 1} 张图片`);
+  return true;
+}
+
+function selectPreviewImageByStep(step) {
+  if (!currentTask) {
+    return false;
+  }
+  const urls = getTaskImageUrls(currentTask);
+  if (urls.length <= 1) {
+    return false;
+  }
+  const currentIndex = Math.max(0, urls.findIndex((url) => url === selectedRefineImageUrl));
+  const nextIndex = (currentIndex + step + urls.length) % urls.length;
+  return selectPreviewImageByIndex(nextIndex);
+}
+
+function resolveTaskImageCount(task) {
+  const n = Number(task?.imageCount);
+  if (IMAGE_COUNT_OPTIONS.has(n)) {
+    return n;
+  }
+  const fromUrls = getTaskImageUrls(task).length;
+  if (IMAGE_COUNT_OPTIONS.has(fromUrls)) {
+    return fromUrls;
+  }
+  return 1;
+}
+
 async function request(path, options = {}) {
   const { headers: optionHeaders, ...rest } = options;
   const token = getAuthToken();
@@ -355,24 +461,98 @@ async function submitWebLogin() {
 function renderPreview(task) {
   currentTask = task;
   enhancedPromptText.textContent = task.enhancedPrompt || '暂未返回优化后的提示词。';
-  const imageUrl = formatImageUrl(task.imageUrl);
-  if (!imageUrl) {
+  const targetCount = resolveTaskImageCount(task);
+  preview.classList.remove('count-1', 'count-2', 'count-4', 'count-8');
+  preview.classList.add(`count-${targetCount}`);
+  const imageUrls = getTaskImageUrls(task);
+  if (imageUrls.length === 0) {
+    selectedRefineImageUrl = '';
+    updateRefineImageHint(task);
+    updateRefineButtonText(task, selectedRefineImageUrl);
+    preview.classList.remove('zoomed');
+    preview.classList.remove('multi', 'multi-many');
     preview.innerHTML = '<span>图片生成中，请稍候</span>';
     openImage.href = '#';
     openImage.classList.add('disabled');
+    if (hdImage) {
+      hdImage.disabled = true;
+    }
     return;
   }
-  preview.innerHTML = `<img src="${imageUrl}" alt="生成图片" />`;
-  openImage.href = imageUrl;
+  if (imageUrls.length === 1) {
+    selectedRefineImageUrl = imageUrls[0];
+    updateRefineImageHint(task, selectedRefineImageUrl);
+    updateRefineButtonText(task, selectedRefineImageUrl);
+    preview.classList.remove('multi', 'multi-many');
+    preview.classList.toggle('zoomed', isPreviewZoomed);
+    preview.innerHTML = `<img class="selectable selected" data-image-url="${imageUrls[0]}" src="${imageUrls[0]}" alt="生成图片" />`;
+  } else {
+    if (!imageUrls.includes(selectedRefineImageUrl)) {
+      selectedRefineImageUrl = imageUrls[0] || '';
+    }
+    updateRefineImageHint(task, selectedRefineImageUrl);
+    updateRefineButtonText(task, selectedRefineImageUrl);
+    const renderUrls = isPreviewZoomed ? [selectedRefineImageUrl] : imageUrls;
+    preview.classList.toggle('zoomed', isPreviewZoomed);
+    preview.classList.add('multi');
+    preview.classList.toggle('multi-many', !isPreviewZoomed && targetCount === 8);
+    preview.innerHTML = renderUrls
+      .map((url, index) => {
+        const badgeNumber = imageUrls.indexOf(url) + 1 || index + 1;
+        return `<div class="preview-item"><img class="selectable ${url === selectedRefineImageUrl ? 'selected' : ''}" data-image-url="${url}" src="${url}" alt="生成图片 ${badgeNumber}" /><span class="preview-badge">#${badgeNumber}</span></div>`;
+      })
+      .join('');
+  }
+  preview.querySelectorAll('img.selectable').forEach((imgEl) => {
+    imgEl.addEventListener('click', () => {
+      const picked = imgEl.dataset.imageUrl || '';
+      if (!picked) {
+        return;
+      }
+      selectedRefineImageUrl = picked;
+      preview.querySelectorAll('img.selectable').forEach((n) => n.classList.remove('selected'));
+      imgEl.classList.add('selected');
+      updateRefineImageHint(task, selectedRefineImageUrl);
+      updateRefineButtonText(task, selectedRefineImageUrl);
+    });
+  });
+  openImage.href = imageUrls[0];
   openImage.classList.remove('disabled');
+  if (hdImage) {
+    hdImage.disabled = false;
+  }
 }
 
-async function createRefineTask(taskId, feedback) {
+function togglePreviewZoom() {
+  const urls = currentTask ? getTaskImageUrls(currentTask) : [];
+  if (urls.length === 0) {
+    return false;
+  }
+  isPreviewZoomed = !isPreviewZoomed;
+  renderPreview(currentTask);
+  setMessage(isPreviewZoomed ? '已放大预览（按空格可还原）' : '已还原常规预览');
+  return true;
+}
+
+function markSelectedHistoryItem() {
+  historyList.querySelectorAll('.history-item').forEach((item) => {
+    const isActive = item.dataset.taskId === selectedHistoryTaskId;
+    item.classList.toggle('active', isActive);
+    if (isActive) {
+      item.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    }
+  });
+}
+
+async function createRefineTask(taskId, feedback, options = {}) {
   return request('/api/refine', {
     method: 'POST',
     body: JSON.stringify({
       taskId,
       feedback,
+      baseImageUrl: options.baseImageUrl ?? selectedRefineImageUrl,
+      imageCount: Number(options.imageCount ?? imageCountInput?.value ?? 1),
+      size: options.size,
       ...(imageModelInput?.value ? { imageModel: imageModelInput.value } : {})
     })
   });
@@ -421,15 +601,44 @@ async function loadHistory() {
     }
     historyList.innerHTML = tasks
       .map((task) => {
-        const imageUrl = formatImageUrl(task.imageUrl);
-        const thumb = imageUrl ? `<img src="${imageUrl}" alt="历史图片" />` : '<span>无图片</span>';
-        return `<article class="history-item">
+        const imageUrls = getTaskImageUrls(task);
+        const thumb = imageUrls.length > 0
+          ? `<div class="history-thumb-grid ${imageUrls.length === 1 ? 'single' : ''}">
+              ${imageUrls.slice(0, 4).map((url, index) => `<img src="${url}" alt="历史图片 ${index + 1}" />`).join('')}
+            </div>`
+          : '<span>无图片</span>';
+        const countText = imageUrls.length > 1 ? ` · ${imageUrls.length}张` : '';
+        const requestedText = task.imageCount ? ` · 请求${task.imageCount}张` : '';
+        return `<article class="history-item" data-task-id="${task.id}">
           <div class="history-thumb">${thumb}</div>
           <p class="history-prompt">${task.prompt}</p>
-          <p class="history-meta">${getStatusText(task.status)} · ${task.imageModel || '默认模型'} · ${task.style || '默认'} · ${task.size || '1024x1024'}</p>
+          <p class="history-meta">${getStatusText(task.status)} · ${task.imageModel || '默认模型'} · ${task.style || '默认'} · ${task.size || '1024x1024'}${requestedText}${countText}</p>
         </article>`;
       })
       .join('');
+
+    historyList.querySelectorAll('.history-item').forEach((item, index) => {
+      const task = tasks[index];
+      if (!task) {
+        return;
+      }
+      item.style.cursor = 'pointer';
+      item.title = '点击加载此任务到右侧预览区';
+      item.addEventListener('click', () => {
+        selectedHistoryTaskId = task.id;
+        markSelectedHistoryItem();
+        statusTitle.textContent = getStatusText(task.status);
+        renderPreview(task);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        const count = getTaskImageUrls(task).length;
+        if (task.status === 'failed') {
+          setMessage(task.error || '该任务生成失败', true);
+          return;
+        }
+        setMessage(count > 0 ? `已加载历史任务：${count} 张图片` : '已加载历史任务');
+      });
+    });
+    markSelectedHistoryItem();
   } catch (error) {
     historyList.innerHTML = `<p class="hint">${error.message}</p>`;
   }
@@ -463,12 +672,14 @@ form.addEventListener('submit', async (event) => {
         prompt,
         style: styleInput.value,
         size: sizeInput.value,
+        imageCount: Number(imageCountInput?.value || 1),
         ...(imageModelInput?.value ? { imageModel: imageModelInput.value } : {}),
         referenceImages
       })
     });
 
     statusTitle.textContent = getStatusText(res.data.status);
+    selectedHistoryTaskId = '';
     setMessage('任务已创建，正在等待模型返回图片');
     renderPreview(res.data);
     await pollTask(res.data.id);
@@ -491,6 +702,11 @@ refineButton.addEventListener('click', async () => {
     setMessage('请填写继续调整意见', true);
     return;
   }
+  const currentUrls = getTaskImageUrls(currentTask);
+  if (currentUrls.length > 1 && !selectedRefineImageUrl) {
+    setMessage('当前有多张图片，请先在右侧点击选中一张再继续调整', true);
+    return;
+  }
 
   refineButton.disabled = true;
   setMessage('正在创建继续调整任务');
@@ -501,6 +717,7 @@ refineButton.addEventListener('click', async () => {
   try {
     const res = await createRefineTask(currentTask.id, feedback);
     currentTask = res.data;
+    selectedHistoryTaskId = '';
     refineFeedback.value = '';
     setMessage('继续调整任务已创建，正在等待模型返回图片');
     renderPreview(res.data);
@@ -509,6 +726,48 @@ refineButton.addEventListener('click', async () => {
     statusTitle.textContent = '继续调整失败';
     setMessage(error.message, true);
   } finally {
+    refineButton.disabled = false;
+  }
+});
+
+hdImage?.addEventListener('click', async () => {
+  if (!currentTask?.id || currentTask.status !== 'succeeded') {
+    setMessage('请先等待当前图片生成成功，再生成高清图', true);
+    return;
+  }
+  const urls = getTaskImageUrls(currentTask);
+  if (urls.length === 0) {
+    setMessage('当前任务没有可用于高清化的图片', true);
+    return;
+  }
+  if (urls.length > 1 && !selectedRefineImageUrl) {
+    setMessage('请先在右侧选择一张基准图，再生成高清图', true);
+    return;
+  }
+  const baseImageUrl = selectedRefineImageUrl || urls[0];
+  const hdFeedback = '请保持当前画面主体、构图和风格不变，仅提升分辨率与细节清晰度，输出 2K 高清版本。';
+  hdImage.disabled = true;
+  refineButton.disabled = true;
+  setMessage('正在创建 2K 高清图任务');
+  statusTitle.textContent = '高清图生成中';
+  preview.innerHTML = '<span>正在生成 2K 高清图</span>';
+  enhancedPromptText.textContent = '正在等待高清图任务返回结果';
+  try {
+    const res = await createRefineTask(currentTask.id, hdFeedback, {
+      baseImageUrl,
+      imageCount: 1,
+      size: '2048x2048'
+    });
+    currentTask = res.data;
+    selectedHistoryTaskId = '';
+    setMessage('高清图任务已创建，正在等待模型返回图片');
+    renderPreview(res.data);
+    await pollTask(res.data.id);
+  } catch (error) {
+    statusTitle.textContent = '高清图生成失败';
+    setMessage(error.message || '高清图生成失败', true);
+  } finally {
+    hdImage.disabled = false;
     refineButton.disabled = false;
   }
 });
@@ -555,7 +814,67 @@ document.addEventListener('paste', (event) => {
   addReferenceFiles(imageFiles, '粘贴');
 });
 
+document.addEventListener('keydown', (event) => {
+  const active = document.activeElement;
+  const inInput =
+    active instanceof HTMLInputElement ||
+    active instanceof HTMLTextAreaElement ||
+    active instanceof HTMLSelectElement;
+  const isRefineTextareaFocused = active === refineFeedback;
+
+  if (inInput && !isRefineTextareaFocused) {
+    return;
+  }
+
+  if (event.code === 'Space' && !inInput) {
+    const ok = togglePreviewZoom();
+    if (ok) {
+      event.preventDefault();
+    }
+    return;
+  }
+
+  if (event.key === 'Enter') {
+    const wantsSubmitFromTextarea = isRefineTextareaFocused && (event.metaKey || event.ctrlKey);
+    const wantsSubmitDirectly = !inInput;
+    if ((wantsSubmitFromTextarea || wantsSubmitDirectly) && !refineButton.disabled) {
+      event.preventDefault();
+      refineButton.click();
+      return;
+    }
+  }
+
+  const key = event.key;
+  if (!/^[1-8]$/.test(key)) {
+    if (key === 'ArrowLeft') {
+      const ok = selectPreviewImageByStep(-1);
+      if (ok) {
+        event.preventDefault();
+      }
+    } else if (key === 'ArrowRight') {
+      const ok = selectPreviewImageByStep(1);
+      if (ok) {
+        event.preventDefault();
+      }
+    }
+    return;
+  }
+  const ok = selectPreviewImageByIndex(Number(key) - 1);
+  if (ok) {
+    event.preventDefault();
+  }
+});
+
+preview.addEventListener('dblclick', () => {
+  togglePreviewZoom();
+});
+
 renderReferencePreview();
+updateRefineImageHint(null);
+updateRefineButtonText(null);
+if (hdImage) {
+  hdImage.disabled = true;
+}
 
 loginSubmit?.addEventListener('click', () => {
   submitWebLogin();

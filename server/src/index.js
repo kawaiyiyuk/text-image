@@ -40,6 +40,7 @@ async function normalizeTaskForClient(task) {
   return {
     ...task,
     imageUrl: '',
+    imageUrls: Array.isArray(task.imageUrls) ? task.imageUrls.filter(Boolean) : [],
     error: task.error || '本地生成图片文件不存在，请重新生成'
   };
 }
@@ -64,6 +65,37 @@ function resolveImageModelForRequest(body, fallbackModel) {
     };
   }
   return { model };
+}
+
+function resolveImageCountForRequest(body, fallbackCount) {
+  const allowed = new Set([1, 2, 4, 8]);
+  const raw = body?.imageCount;
+  if (raw == null || raw === '') {
+    return allowed.has(Number(fallbackCount)) ? Number(fallbackCount) : 1;
+  }
+  const count = Number(raw);
+  if (!Number.isFinite(count)) {
+    return allowed.has(Number(fallbackCount)) ? Number(fallbackCount) : 1;
+  }
+  const normalized = Math.trunc(count);
+  if (allowed.has(normalized)) {
+    return normalized;
+  }
+  return allowed.has(Number(fallbackCount)) ? Number(fallbackCount) : 1;
+}
+
+function resolveImageSizeForRequest(body, fallbackSize) {
+  const allowed = new Set(['1024x1024', '1024x1536', '1536x1024', '2048x2048']);
+  const raw = body?.size;
+  const normalized = raw != null ? String(raw).trim() : '';
+  if (allowed.has(normalized)) {
+    return normalized;
+  }
+  const fb = String(fallbackSize || '').trim();
+  if (allowed.has(fb)) {
+    return fb;
+  }
+  return '1024x1024';
 }
 
 async function materializeImageForEdit(imageUrl, taskId) {
@@ -103,9 +135,18 @@ function runImageTask(task) {
   generateImage(task)
     .then((result) => {
       const imageUrl = typeof result === 'string' ? result : result.imageUrl;
+      const imageUrls =
+        typeof result === 'string'
+          ? [result]
+          : Array.isArray(result.imageUrls)
+            ? result.imageUrls
+            : imageUrl
+              ? [imageUrl]
+              : [];
       return taskStore.update(task.id, {
         status: 'succeeded',
         imageUrl,
+        imageUrls,
         enhancedPrompt: result.enhancedPrompt || '',
         error: ''
       });
@@ -250,7 +291,8 @@ app.post('/api/generate', auth.middleware, async (req, res) => {
     top_p,
     frequency_penalty,
     presence_penalty,
-    max_tokens
+    max_tokens,
+    imageCount
   } = req.body || {};
   if (!prompt || !String(prompt).trim()) {
     res.status(400).json({
@@ -270,12 +312,15 @@ app.post('/api/generate', auth.middleware, async (req, res) => {
   }
 
   const now = new Date().toISOString();
+  const resolvedImageCount = resolveImageCountForRequest(req.body, config.model.imageCount);
+  const resolvedSize = resolveImageSizeForRequest(req.body, size);
   const task = await taskStore.create({
     id: uuidv4(),
     prompt: String(prompt).trim(),
     style,
-    size,
+    size: resolvedSize,
     imageModel: resolved.model,
+    imageCount: resolvedImageCount,
     referenceImages: Array.isArray(referenceImages) ? referenceImages : [],
     chatMessages: Array.isArray(messages) ? messages : null,
     chatGroup: group != null ? String(group).trim() : '',
@@ -289,6 +334,7 @@ app.post('/api/generate', auth.middleware, async (req, res) => {
     },
     status: 'processing',
     imageUrl: '',
+    imageUrls: [],
     enhancedPrompt: '',
     error: '',
     createdAt: now,
@@ -304,7 +350,7 @@ app.post('/api/generate', auth.middleware, async (req, res) => {
 });
 
 app.post('/api/refine', auth.middleware, async (req, res) => {
-  const { taskId, feedback } = req.body || {};
+  const { taskId, feedback, baseImageUrl } = req.body || {};
   if (!taskId || !String(feedback || '').trim()) {
     res.status(400).json({
       success: false,
@@ -341,11 +387,25 @@ app.post('/api/refine', auth.middleware, async (req, res) => {
   }
 
   const id = uuidv4();
-  const previousResultImage = await materializeImageForEdit(previousTask.imageUrl, id);
+  const candidateBaseImages = Array.isArray(previousTask.imageUrls) && previousTask.imageUrls.length
+    ? previousTask.imageUrls.filter(Boolean)
+    : [previousTask.imageUrl].filter(Boolean);
+  const selectedBaseImage = String(baseImageUrl || '').trim();
+  const baseImageForRefine = selectedBaseImage || previousTask.imageUrl;
+  if (selectedBaseImage && !candidateBaseImages.includes(selectedBaseImage)) {
+    res.status(400).json({
+      success: false,
+      message: '所选继续调整基准图无效，请重新选择'
+    });
+    return;
+  }
+  const previousResultImage = await materializeImageForEdit(baseImageForRefine, id);
   const faceReferenceImages = Array.isArray(previousTask.referenceImages)
     ? previousTask.referenceImages.slice(1)
     : [];
   const now = new Date().toISOString();
+  const resolvedImageCount = resolveImageCountForRequest(req.body, previousTask.imageCount || config.model.imageCount);
+  const resolvedSize = resolveImageSizeForRequest(req.body, previousTask.size || '1024x1024');
   const task = await taskStore.create({
     id,
     conversationId: previousTask.conversationId || previousTask.id,
@@ -357,11 +417,13 @@ app.post('/api/refine', auth.middleware, async (req, res) => {
     ].join('\n'),
     feedback: String(feedback).trim(),
     style: previousTask.style || 'realistic',
-    size: previousTask.size || '1024x1024',
+    size: resolvedSize,
     imageModel: resolved.model,
+    imageCount: resolvedImageCount,
     referenceImages: [previousResultImage, ...faceReferenceImages].slice(0, 4),
     status: 'processing',
     imageUrl: '',
+    imageUrls: [],
     enhancedPrompt: '',
     error: '',
     createdAt: now,

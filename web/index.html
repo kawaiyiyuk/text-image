@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>图文生图 Demo</title>
-    <link rel="stylesheet" href="./styles.css?v=20260430-2" />
+    <link rel="stylesheet" href="./styles.css?v=20260430-8" />
   </head>
   <body>
     <div id="loginGate" class="login-gate hidden" aria-hidden="true">
@@ -34,12 +34,6 @@
     </div>
 
     <main class="app">
-      <section class="hero">
-        <p class="eyebrow">AI Image Generator</p>
-        <h1>图文生图</h1>
-        <p>纯网页前端，通过浏览器调用本机或部署后的 Node 服务完成生图与历史记录。</p>
-      </section>
-
       <section class="layout">
         <form class="panel" id="generateForm">
           <div class="field">
@@ -65,6 +59,16 @@
                 <option value="1024x1024">方图 1024x1024</option>
                 <option value="1024x1536">竖图 1024x1536</option>
                 <option value="1536x1024">横图 1536x1024</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="imageCount">输出数量</label>
+              <select id="imageCount">
+                <option value="1" selected>1 张</option>
+                <option value="2">2 张</option>
+                <option value="4">4 张</option>
+                <option value="8">8 张</option>
               </select>
             </div>
           </div>
@@ -106,6 +110,7 @@
             <div>
               <p class="eyebrow">Result</p>
               <h2 id="statusTitle">等待生成</h2>
+              <p class="preview-shortcut-hint">快捷操作：空格或双击预览区可放大/还原</p>
             </div>
             <button class="secondary" type="button" id="refreshHistory">刷新历史</button>
           </div>
@@ -121,10 +126,12 @@
 
           <div class="actions">
             <a class="secondary link-button disabled" id="openImage" href="#" target="_blank" rel="noreferrer">打开原图</a>
+            <button class="secondary" type="button" id="hdImage">高清图</button>
           </div>
 
           <div class="refine-box">
             <label for="refineFeedback">继续调整</label>
+            <p class="hint" id="refineImageHint">请先在上方结果图中选中要继续调整的图片。</p>
             <textarea id="refineFeedback" maxlength="500" placeholder="例如：脸再小一点，肤色更接近身体，边缘融合自然一点"></textarea>
             <button class="secondary" type="button" id="refineButton">基于当前结果继续调整</button>
           </div>
@@ -142,6 +149,6 @@
       </section>
     </main>
 
-    <script src="./app.js?v=20260430-2"></script>
+    <script src="./app.js?v=20260430-8"></script>
   </body>
 </html>

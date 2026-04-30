@@ -17,12 +17,12 @@ const STYLE_PROMPTS = {
   product: '专业产品摄影，棚拍灯光，背景简洁'
 };
 
-function buildPrompt({ prompt, style, referenceImages = [] }) {
+function buildPrompt({ prompt, style, size = '1024x1024', referenceImages = [] }) {
   const stylePrompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.realistic;
   const references = referenceImages.length
     ? '\n'
     : '';
-  return `${prompt}\n风格要求：${stylePrompt}。${references}`;
+  return `${prompt}\n风格要求：${stylePrompt}。\n尺寸要求：${size}。${references}`;
 }
 
 function escapeXml(value) {
@@ -71,11 +71,13 @@ function createAbortSignal() {
 }
 
 function createImagePayload(task) {
-  const imageCount = Number.isFinite(config.model.imageCount) ? config.model.imageCount : 1;
+  const requestedCount = Number.isFinite(Number(task.imageCount)) ? Math.trunc(Number(task.imageCount)) : Math.trunc(Number(config.model.imageCount) || 1);
+  const imageCount = [1, 2, 4, 8].includes(requestedCount) ? requestedCount : 4;
   return {
     model: task.imageModel || config.model.imageModel,
     prompt: buildPrompt(task),
-    n: Math.min(Math.max(imageCount, 1), 4),
+    n: imageCount,
+    size: task.size || '1024x1024',
     response_format: config.model.responseFormat
   };
 }
@@ -163,17 +165,18 @@ async function appendReferenceImages(formData, referenceImages) {
   return totalBytes;
 }
 
-async function saveImageResult(task, first) {
-  if (first.b64_json) {
+async function saveImageResult(task, image, index = 0) {
+  if (image.b64_json) {
     const outputDir = path.join(config.uploadDir, 'generated');
     await fs.mkdir(outputDir, { recursive: true });
-    const fileName = `${task.id}.png`;
-    await fs.writeFile(path.join(outputDir, fileName), Buffer.from(first.b64_json, 'base64'));
+    const suffix = index > 0 ? `-${index + 1}` : '';
+    const fileName = `${task.id}${suffix}.png`;
+    await fs.writeFile(path.join(outputDir, fileName), Buffer.from(image.b64_json, 'base64'));
     return `/uploads/generated/${fileName}`;
   }
 
-  if (first.url) {
-    return first.url;
+  if (image.url) {
+    return image.url;
   }
 
   throw new Error('模型接口返回格式无法识别');
@@ -212,12 +215,12 @@ async function parseImageResponse(res, label = 'images') {
     throw new Error(modelApiErrorMessage(res.status, data, rawText));
   }
 
-  const first = data.data?.[0];
-  if (!first) {
+  const images = Array.isArray(data.data) ? data.data : [];
+  if (images.length === 0) {
     throw new Error('模型接口未返回图片数据');
   }
 
-  return first;
+  return images;
 }
 
 function getModelApiUrl(endpoint) {
@@ -378,7 +381,7 @@ async function parseChatCompletionResponse(res) {
   return imageRef;
 }
 
-async function callImageViaChatCompletions(task, promptText) {
+async function callImageViaChatCompletionsOnce(task, promptText, index = 0) {
   const model = task.imageModel || config.model.imageModel;
   const customMessages = normalizeChatMessages(task.chatMessages);
   const userContent = customMessages ? null : await buildChatUserContent(task, promptText);
@@ -425,10 +428,30 @@ async function callImageViaChatCompletions(task, promptText) {
       body
     });
     const imageRef = await parseChatCompletionResponse(res);
+    if (imageRef.startsWith('data:image') && imageRef.includes(';base64,')) {
+      const [, b64] = imageRef.split(';base64,');
+      const outputDir = path.join(config.uploadDir, 'generated');
+      await fs.mkdir(outputDir, { recursive: true });
+      const suffix = index > 0 ? `-${index + 1}` : '';
+      const fileName = `${task.id}${suffix}.png`;
+      await fs.writeFile(path.join(outputDir, fileName), Buffer.from(b64, 'base64'));
+      return `/uploads/generated/${fileName}`;
+    }
     return persistChatImageResult(task, imageRef);
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function callImageViaChatCompletions(task, promptText) {
+  const requestedCount = Number.isFinite(Number(task.imageCount)) ? Math.trunc(Number(task.imageCount)) : Math.trunc(Number(config.model.imageCount) || 1);
+  const count = [1, 2, 4, 8].includes(requestedCount) ? requestedCount : 4;
+  const imageUrls = [];
+  for (let i = 0; i < count; i += 1) {
+    const imageUrl = await callImageViaChatCompletionsOnce(task, promptText, i);
+    imageUrls.push(imageUrl);
+  }
+  return imageUrls;
 }
 
 async function callImageGenerationApi(task, prompt) {
@@ -444,8 +467,8 @@ async function callImageGenerationApi(task, prompt) {
       body: JSON.stringify(createImagePayload({ ...task, prompt }))
     });
 
-    const first = await parseImageResponse(res, 'images/generations');
-    return saveImageResult(task, first);
+    const images = await parseImageResponse(res, 'images/generations');
+    return Promise.all(images.map((image, index) => saveImageResult(task, image, index)));
   } finally {
     clearTimeout(timeout);
   }
@@ -475,8 +498,8 @@ async function callImageEditApi(task, prompt) {
       body: formData
     });
 
-    const first = await parseImageResponse(res, 'images/edits');
-    return saveImageResult(task, first);
+    const images = await parseImageResponse(res, 'images/edits');
+    return Promise.all(images.map((image, index) => saveImageResult(task, image, index)));
   } finally {
     clearTimeout(timeout);
   }
@@ -505,15 +528,15 @@ export async function generateImage(task) {
   const modelName = task.imageModel || config.model.imageModel;
   if (usesChatCompletionsForImage(modelName)) {
     console.log(`[Image] 任务 ${task.id} 使用 Chat Completions 生图（${modelName}）`);
-    const imageUrl = await callImageViaChatCompletions(task, enhancedPrompt);
-    return { imageUrl, enhancedPrompt };
+    const imageUrls = await callImageViaChatCompletions(task, enhancedPrompt);
+    return { imageUrl: imageUrls[0] || '', imageUrls, enhancedPrompt };
   }
 
   if (task.referenceImages?.length) {
-    const imageUrl = await callImageEditApi(task, enhancedPrompt);
-    return { imageUrl, enhancedPrompt };
+    const imageUrls = await callImageEditApi(task, enhancedPrompt);
+    return { imageUrl: imageUrls[0] || '', imageUrls, enhancedPrompt };
   }
 
-  const imageUrl = await callImageGenerationApi(task, enhancedPrompt);
-  return { imageUrl, enhancedPrompt };
+  const imageUrls = await callImageGenerationApi(task, enhancedPrompt);
+  return { imageUrl: imageUrls[0] || '', imageUrls, enhancedPrompt };
 }
