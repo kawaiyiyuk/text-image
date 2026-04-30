@@ -7,9 +7,10 @@ export function createAuth(config) {
 
   function issueToken() {
     const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + (config.auth.tokenTtlMs || 7 * 24 * 60 * 60 * 1000);
+    const tokenTtlMs = config.auth.tokenTtlMs || 7 * 24 * 60 * 60 * 1000;
+    const expiresAt = Date.now() + tokenTtlMs;
     sessions.set(token, expiresAt);
-    return token;
+    return { token, expiresAt, tokenTtlMs };
   }
 
   function verifyToken(token) {
@@ -70,10 +71,15 @@ export function createAuth(config) {
       });
       return;
     }
-    const token = issueToken();
+    const session = issueToken();
     res.json({
       success: true,
-      data: { token, authRequired: true }
+      data: {
+        token: session.token,
+        expiresAt: session.expiresAt,
+        tokenTtlMs: session.tokenTtlMs,
+        authRequired: true
+      }
     });
   }
 

@@ -24,6 +24,7 @@ const loginHint = document.querySelector('#loginHint');
 const deepseekToggle = document.querySelector('#deepseekToggle');
 const deepseekToggleHint = document.querySelector('#deepseekToggleHint');
 const deepseekStatusChip = document.querySelector('#deepseekStatusChip');
+const referenceField = referencePreview?.closest('.field') || null;
 
 let pollingTimer = null;
 let referencePreviewUrls = [];
@@ -32,16 +33,57 @@ let currentTask = null;
 const MAX_REFERENCE_FILE_SIZE = 5 * 1024 * 1024;
 const MAX_REFERENCE_COUNT = 4;
 const AUTH_STORAGE_KEY = 'textImagesAuthToken';
+const AUTH_EXPIRES_IN_MS = 7 * 24 * 60 * 60 * 1000;
 
 function getAuthToken() {
-  return sessionStorage.getItem(AUTH_STORAGE_KEY) || '';
+  const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+  if (!raw) {
+    return '';
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.token === 'string') {
+      if (parsed.expiresAt && Number(parsed.expiresAt) > Date.now()) {
+        return parsed.token;
+      }
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+      return '';
+    }
+  } catch {
+    // 兼容历史纯字符串 token 格式：迁移到新格式并设置 7 天有效期
+    const legacyToken = raw.trim();
+    if (legacyToken) {
+      setAuthToken(legacyToken);
+      return legacyToken;
+    }
+  }
+
+  localStorage.removeItem(AUTH_STORAGE_KEY);
+  return '';
 }
 
-function setAuthToken(token) {
+function normalizeExpiresAt(expiresAt, tokenTtlMs) {
+  const expiresAtNum = Number(expiresAt);
+  if (Number.isFinite(expiresAtNum) && expiresAtNum > Date.now()) {
+    return expiresAtNum;
+  }
+  const ttlNum = Number(tokenTtlMs);
+  if (Number.isFinite(ttlNum) && ttlNum > 0) {
+    return Date.now() + ttlNum;
+  }
+  return Date.now() + AUTH_EXPIRES_IN_MS;
+}
+
+function setAuthToken(token, options = {}) {
   if (token) {
-    sessionStorage.setItem(AUTH_STORAGE_KEY, token);
+    const expiresAt = normalizeExpiresAt(options.expiresAt, options.tokenTtlMs);
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
+      token,
+      expiresAt
+    }));
   } else {
-    sessionStorage.removeItem(AUTH_STORAGE_KEY);
+    localStorage.removeItem(AUTH_STORAGE_KEY);
   }
 }
 
@@ -99,15 +141,53 @@ function removeFile(index) {
   renderReferencePreview();
 }
 
-function renderReferencePreview() {
-  clearReferencePreviewUrls();
-
-  if (selectedFiles.length === 0) {
-    referencePreview.innerHTML = '<p class="hint">还没有选择参考图</p>';
-    updateRefCount();
+function addReferenceFiles(incomingFiles, sourceLabel = '选择') {
+  const files = Array.from(incomingFiles || []);
+  if (files.length === 0) {
     return;
   }
 
+  const imageFiles = files.filter((file) => file && /^image\//.test(file.type || ''));
+  if (imageFiles.length === 0) {
+    setMessage('仅支持添加图片文件', true);
+    return;
+  }
+
+  const remaining = MAX_REFERENCE_COUNT - selectedFiles.length;
+  if (remaining <= 0) {
+    setMessage(`最多只能添加 ${MAX_REFERENCE_COUNT} 张参考图`, true);
+    return;
+  }
+
+  const acceptedFiles = imageFiles.slice(0, remaining);
+  selectedFiles = [...selectedFiles, ...acceptedFiles];
+  renderReferencePreview();
+
+  if (imageFiles.length > remaining) {
+    setMessage(`最多只能添加 ${MAX_REFERENCE_COUNT} 张参考图，已自动忽略超出部分`, true);
+  } else if (sourceLabel === '粘贴') {
+    setMessage(`已通过${sourceLabel}添加 ${acceptedFiles.length} 张参考图`);
+  }
+}
+
+function shouldHandlePasteForReference(event) {
+  if (!referenceField) {
+    return false;
+  }
+  const target = event.target;
+  if (target instanceof Element && referenceField.contains(target)) {
+    return true;
+  }
+  if (document.activeElement instanceof Element && referenceField.contains(document.activeElement)) {
+    return true;
+  }
+  return referenceField.matches(':hover');
+}
+
+function renderReferencePreview() {
+  clearReferencePreviewUrls();
+
+  const emptyHint = selectedFiles.length === 0 ? '<p class="hint">还没有选择参考图</p>' : '';
   const items = selectedFiles
     .map((file, index) => {
       const url = URL.createObjectURL(file);
@@ -125,7 +205,7 @@ function renderReferencePreview() {
     ? `<button type="button" class="ref-add" id="refAddBtn"><span>+</span><span>${selectedFiles.length === 0 ? '添加参考图' : '继续添加'}</span></button>`
     : '';
 
-  referencePreview.innerHTML = items + addBtn;
+  referencePreview.innerHTML = emptyHint + items + addBtn;
 
   // bind events
   referencePreview.querySelectorAll('.ref-delete').forEach((btn) => {
@@ -253,7 +333,10 @@ async function submitWebLogin() {
       return;
     }
     if (loginData.data?.token) {
-      setAuthToken(loginData.data.token);
+      setAuthToken(loginData.data.token, {
+        expiresAt: loginData.data.expiresAt,
+        tokenTtlMs: loginData.data.tokenTtlMs
+      });
     }
     setLoginGateVisible(false);
     if (loginPassword) {
@@ -433,19 +516,43 @@ refineButton.addEventListener('click', async () => {
 refreshHistory.addEventListener('click', loadHistory);
 
 referenceInput.addEventListener('change', () => {
-  const files = Array.from(referenceInput.files || []);
-  if (files.length === 0) return;
+  const files = referenceInput.files || [];
+  addReferenceFiles(files, '选择');
+  referenceInput.value = '';
+});
 
-  const remaining = MAX_REFERENCE_COUNT - selectedFiles.length;
-  if (remaining <= 0) {
-    referenceInput.value = '';
+document.addEventListener('paste', (event) => {
+  if (!shouldHandlePasteForReference(event)) {
     return;
   }
 
-  const newFiles = files.slice(0, remaining);
-  selectedFiles = [...selectedFiles, ...newFiles];
-  referenceInput.value = '';
-  renderReferencePreview();
+  const clipboardItems = Array.from(event.clipboardData?.items || []);
+  if (clipboardItems.length === 0) {
+    return;
+  }
+
+  const imageFiles = clipboardItems
+    .filter((item) => item.kind === 'file' && /^image\//.test(item.type || ''))
+    .map((item, index) => {
+      const file = item.getAsFile();
+      if (!file) {
+        return null;
+      }
+      if (file.name) {
+        return file;
+      }
+      const ext = (file.type || 'image/png').split('/')[1] || 'png';
+      return new File([file], `pasted-image-${Date.now()}-${index}.${ext}`, { type: file.type || 'image/png' });
+    })
+    .filter(Boolean);
+
+  if (imageFiles.length === 0) {
+    setMessage('当前粘贴内容不是图片，请复制图片后再试', true);
+    return;
+  }
+
+  event.preventDefault();
+  addReferenceFiles(imageFiles, '粘贴');
 });
 
 renderReferencePreview();
