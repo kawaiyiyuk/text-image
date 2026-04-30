@@ -1,0 +1,10 @@
+{
+  "name": "text-images",
+  "version": "0.1.0",
+  "private": true,
+  "description": "图文生图：纯网页前端（web/）+ Node.js 后端（server/）。",
+  "scripts": {
+    "server": "npm --prefix server run dev",
+    "server:start": "npm --prefix server start"
+  }
+}

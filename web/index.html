@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>图文生图 Demo</title>
+    <link rel="stylesheet" href="./styles.css?v=20260430-2" />
+  </head>
+  <body>
+    <div id="loginGate" class="login-gate hidden" aria-hidden="true">
+      <div class="login-card">
+        <p class="eyebrow">Access</p>
+        <h2 class="login-title">登录</h2>
+        <p class="login-hint" id="loginHint">请使用分配的账号登录后继续使用。</p>
+        <label class="login-label" for="loginUsername">账号</label>
+        <input
+          type="text"
+          id="loginUsername"
+          class="login-input"
+          autocomplete="username"
+          placeholder="账号"
+        />
+        <label class="login-label" for="loginPassword">密码</label>
+        <input
+          type="password"
+          id="loginPassword"
+          class="login-input"
+          autocomplete="current-password"
+          placeholder="密码"
+        />
+        <p class="login-error" id="loginError" hidden></p>
+        <button type="button" class="primary login-submit" id="loginSubmit">进入</button>
+      </div>
+    </div>
+
+    <main class="app">
+      <section class="hero">
+        <p class="eyebrow">AI Image Generator</p>
+        <h1>图文生图</h1>
+        <p>纯网页前端，通过浏览器调用本机或部署后的 Node 服务完成生图与历史记录。</p>
+      </section>
+
+      <section class="layout">
+        <form class="panel" id="generateForm">
+          <div class="field">
+            <label for="prompt">图片描述</label>
+            <textarea id="prompt" maxlength="800" placeholder="例如：一只穿宇航服的橘猫站在月球上，电影感灯光，细节丰富"></textarea>
+          </div>
+
+          <div class="grid">
+            <div class="field">
+              <label for="style">风格</label>
+              <select id="style">
+                <option value="realistic">写实</option>
+                <option value="illustration">插画</option>
+                <option value="chinese">国风</option>
+                <option value="anime">动漫</option>
+                <option value="product">产品图</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="size">尺寸</label>
+              <select id="size">
+                <option value="1024x1024">方图 1024x1024</option>
+                <option value="1024x1536">竖图 1024x1536</option>
+                <option value="1536x1024">横图 1536x1024</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="imageModel">生图模型</label>
+            <select id="imageModel">
+              <option value="gpt-image-2">gpt-image-2</option>
+              <option value="nano-banana">nano-banana</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="referenceImage">参考图 <span id="refCount">(可选)</span></label>
+            <input id="referenceImage" type="file" accept="image/*" multiple class="hidden-input" />
+            <div class="reference-preview" id="referencePreview">
+              <p class="hint">还没有选择参考图</p>
+            </div>
+            <p class="hint">支持添加多张参考图（最多 4 张），选完后可继续添加或删除。单张图片大小限制为 5MB。</p>
+          </div>
+
+          <button class="primary" type="submit" id="submitButton">开始生成</button>
+          <p class="message" id="message"></p>
+        </form>
+
+        <section class="panel result">
+          <div class="result-header">
+            <div>
+              <p class="eyebrow">Result</p>
+              <h2 id="statusTitle">等待生成</h2>
+            </div>
+            <button class="secondary" type="button" id="refreshHistory">刷新历史</button>
+          </div>
+
+          <div class="preview" id="preview">
+            <span>生成后的图片会显示在这里</span>
+          </div>
+
+          <div class="prompt-box" id="promptBox">
+            <p class="prompt-label">DeepSeek 优化提示词</p>
+            <p class="prompt-text" id="enhancedPromptText">生成完成后会显示实际提交给图片模型的提示词。</p>
+          </div>
+
+          <div class="actions">
+            <a class="secondary link-button disabled" id="openImage" href="#" target="_blank" rel="noreferrer">打开原图</a>
+          </div>
+
+          <div class="refine-box">
+            <label for="refineFeedback">继续调整</label>
+            <textarea id="refineFeedback" maxlength="500" placeholder="例如：脸再小一点，肤色更接近身体，边缘融合自然一点"></textarea>
+            <button class="secondary" type="button" id="refineButton">基于当前结果继续调整</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel history">
+        <div class="result-header">
+          <div>
+            <p class="eyebrow">History</p>
+            <h2>最近生成</h2>
+          </div>
+        </div>
+        <div class="history-list" id="historyList"></div>
+      </section>
+    </main>
+
+    <script src="./app.js?v=20260430-2"></script>
+  </body>
+</html>
