@@ -78,6 +78,14 @@
           </div>
 
           <div class="field">
+            <div class="toggle-row">
+              <label for="deepseekToggle">提示词优化（DeepSeek）</label>
+              <input id="deepseekToggle" type="checkbox" />
+            </div>
+            <p class="hint" id="deepseekToggleHint">加载中...</p>
+          </div>
+
+          <div class="field">
             <label for="referenceImage">参考图 <span id="refCount">(可选)</span></label>
             <input id="referenceImage" type="file" accept="image/*" multiple class="hidden-input" />
             <div class="reference-preview" id="referencePreview">
@@ -87,6 +95,9 @@
           </div>
 
           <button class="primary" type="submit" id="submitButton">开始生成</button>
+          <p class="status-chip-row">
+            <span class="status-chip" id="deepseekStatusChip">提示词优化状态：加载中</span>
+          </p>
           <p class="message" id="message"></p>
         </form>
 

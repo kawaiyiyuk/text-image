@@ -19,8 +19,25 @@ function createAbortSignal() {
   return { controller, timeout };
 }
 
+let runtimeDeepSeekEnabled = Boolean(config.deepseek.enabled);
+
+export function getDeepSeekRuntimeStatus() {
+  const available = Boolean(config.deepseek.apiKey);
+  return {
+    enabled: runtimeDeepSeekEnabled && available,
+    requestedEnabled: runtimeDeepSeekEnabled,
+    available
+  };
+}
+
+export function setDeepSeekRuntimeEnabled(enabled) {
+  runtimeDeepSeekEnabled = Boolean(enabled);
+  return getDeepSeekRuntimeStatus();
+}
+
 export async function enhanceImagePrompt({ prompt, style, hasReferenceImages }) {
-  if (!config.deepseek.enabled) {
+  const status = getDeepSeekRuntimeStatus();
+  if (!status.enabled) {
     return prompt;
   }
 

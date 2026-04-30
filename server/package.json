@@ -13,6 +13,7 @@
     "dotenv": "latest",
     "express": "latest",
     "multer": "latest",
+    "sharp": "^0.33.5",
     "uuid": "latest"
   }
 }

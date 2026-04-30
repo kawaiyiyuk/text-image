@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { config } from './config.js';
 import { createAuth } from './auth.js';
 import { generateImage } from './services/modelService.js';
+import { getDeepSeekRuntimeStatus, setDeepSeekRuntimeEnabled } from './services/deepseekService.js';
 import { TaskStore } from './storage/taskStore.js';
 
 const app = express();
@@ -54,7 +55,7 @@ function getExtensionFromContentType(contentType = '') {
 }
 
 function resolveImageModelForRequest(body, fallbackModel) {
-  const raw = body?.imageModel;
+  const raw = body?.imageModel ?? body?.model;
   const trimmed = raw != null ? String(raw).trim() : '';
   const model = trimmed || fallbackModel;
   if (!config.model.imageModelOptions.includes(model)) {
@@ -154,17 +155,43 @@ app.use(express.static(config.webDir, {
 }));
 
 app.get('/api/health', (req, res) => {
+  const deepseekStatus = getDeepSeekRuntimeStatus();
   res.json({
     success: true,
     data: {
       status: 'ok',
       mock: config.model.mock,
-      deepseekEnabled: config.deepseek.enabled,
+      deepseekEnabled: deepseekStatus.enabled,
+      deepseekRequestedEnabled: deepseekStatus.requestedEnabled,
+      deepseekAvailable: deepseekStatus.available,
       deepseekModel: config.deepseek.model,
       imageModelDefault: config.model.imageModel,
       imageModelOptions: config.model.imageModelOptions,
       imageModelsViaChat: config.model.imageModelsViaChat
     }
+  });
+});
+
+app.get('/api/deepseek/status', auth.middleware, (req, res) => {
+  res.json({
+    success: true,
+    data: getDeepSeekRuntimeStatus()
+  });
+});
+
+app.post('/api/deepseek/toggle', auth.middleware, (req, res) => {
+  const { enabled } = req.body || {};
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({
+      success: false,
+      message: 'enabled 必须是布尔值'
+    });
+    return;
+  }
+  const next = setDeepSeekRuntimeEnabled(enabled);
+  res.json({
+    success: true,
+    data: next
   });
 });
 
@@ -211,7 +238,20 @@ app.post('/api/upload', auth.middleware, upload.fields([
 });
 
 app.post('/api/generate', auth.middleware, async (req, res) => {
-  const { prompt, style = 'realistic', size = '1024x1024', referenceImages = [] } = req.body || {};
+  const {
+    prompt,
+    style = 'realistic',
+    size = '1024x1024',
+    referenceImages = [],
+    messages,
+    group,
+    stream,
+    temperature,
+    top_p,
+    frequency_penalty,
+    presence_penalty,
+    max_tokens
+  } = req.body || {};
   if (!prompt || !String(prompt).trim()) {
     res.status(400).json({
       success: false,
@@ -237,6 +277,16 @@ app.post('/api/generate', auth.middleware, async (req, res) => {
     size,
     imageModel: resolved.model,
     referenceImages: Array.isArray(referenceImages) ? referenceImages : [],
+    chatMessages: Array.isArray(messages) ? messages : null,
+    chatGroup: group != null ? String(group).trim() : '',
+    chatStreamRequested: Boolean(stream),
+    chatOptions: {
+      temperature,
+      top_p,
+      frequency_penalty,
+      presence_penalty,
+      max_tokens
+    },
     status: 'processing',
     imageUrl: '',
     enhancedPrompt: '',

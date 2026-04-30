@@ -1,7 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import sharp from 'sharp';
 import { config } from '../config.js';
 import { enhanceImagePrompt } from './deepseekService.js';
+
+/** 参考图写入 JSON（chat）或 multipart（images/edits）时过大易触发上游网关 413 */
+const CHAT_REF_MAX_RAW_BYTES = Number(process.env.MODEL_CHAT_REF_MAX_RAW_BYTES || 512000);
+const CHAT_REF_MAX_EDGE = Number(process.env.MODEL_CHAT_REF_MAX_EDGE || 1536);
+const CHAT_REF_JPEG_QUALITY = Number(process.env.MODEL_CHAT_REF_JPEG_QUALITY || 82);
 
 const STYLE_PROMPTS = {
   realistic: '写实摄影风格，真实光影，高细节',
@@ -93,13 +99,68 @@ function getMimeType(filePath) {
   return map[ext] || 'application/octet-stream';
 }
 
-async function appendReferenceImages(formData, referenceImages) {
-  for (const imageUrl of referenceImages) {
-    const filePath = parseLocalUploadPath(imageUrl);
-    const buffer = await fs.readFile(filePath);
-    const blob = new Blob([buffer], { type: getMimeType(filePath) });
-    formData.append('image', blob, path.basename(filePath));
+async function prepareReferenceImageForModelApi(imageUrl) {
+  const filePath = parseLocalUploadPath(imageUrl);
+  const input = await fs.readFile(filePath);
+  const originalName = path.basename(filePath);
+  let mime = getMimeType(filePath);
+  let buf = input;
+  let didCompress = false;
+
+  let needCompress = input.length > CHAT_REF_MAX_RAW_BYTES;
+  if (!needCompress) {
+    try {
+      const meta = await sharp(input).metadata();
+      const w = meta.width || 0;
+      const h = meta.height || 0;
+      if (w > CHAT_REF_MAX_EDGE || h > CHAT_REF_MAX_EDGE) {
+        needCompress = true;
+      }
+    } catch {
+      /* 无法解析则保持原图 */
+    }
   }
+
+  if (needCompress) {
+    try {
+      const meta = await sharp(input).rotate().metadata();
+      const w = meta.width || 0;
+      const h = meta.height || 0;
+      const pipeline =
+        w > CHAT_REF_MAX_EDGE || h > CHAT_REF_MAX_EDGE
+          ? sharp(input)
+              .rotate()
+              .resize(CHAT_REF_MAX_EDGE, CHAT_REF_MAX_EDGE, { fit: 'inside', withoutEnlargement: true })
+          : sharp(input).rotate();
+      buf = await pipeline.jpeg({ quality: CHAT_REF_JPEG_QUALITY, mozjpeg: true }).toBuffer();
+      mime = 'image/jpeg';
+      didCompress = true;
+      console.log(
+        `[Image] 参考图已压缩（chat / images/edits 共用，减轻体积）：${originalName} ${input.length} → ${buf.length} 字节`
+      );
+    } catch (e) {
+      console.warn(`[Image] 参考图压缩失败，使用原图：${e.message}`);
+      buf = input;
+      mime = getMimeType(filePath);
+    }
+  }
+
+  const filename = didCompress
+    ? `${path.basename(filePath, path.extname(filePath)) || 'ref'}-model.jpg`
+    : originalName;
+
+  return { buffer: buf, mime, filename };
+}
+
+/** @returns {Promise<number>} 参考图文件字节合计（压缩后） */
+async function appendReferenceImages(formData, referenceImages) {
+  let totalBytes = 0;
+  for (const imageUrl of referenceImages) {
+    const { buffer, mime, filename } = await prepareReferenceImageForModelApi(imageUrl);
+    totalBytes += buffer.length;
+    formData.append('image', new Blob([buffer], { type: mime }), filename);
+  }
+  return totalBytes;
 }
 
 async function saveImageResult(task, first) {
@@ -118,10 +179,37 @@ async function saveImageResult(task, first) {
   throw new Error('模型接口返回格式无法识别');
 }
 
-async function parseImageResponse(res) {
-  const data = await res.json().catch(() => ({}));
+function modelApiErrorMessage(status, data, rawText) {
+  if (data?.error?.message || data?.message) {
+    return data.error?.message || data.message;
+  }
+  const t = String(rawText || '').trim();
+  if (/<html[\s>]/i.test(t)) {
+    return `模型接口失败：${status}（响应为 HTML，多为网关/Nginx 限流或限体积，非 OpenAI 式 JSON 业务错误）`;
+  }
+  return t ? t.slice(0, 280) : `模型接口失败：${status}`;
+}
+
+function logModelApiFailure(label, res, rawText) {
+  const url = res.url || '(fetch 未提供 url)';
+  const snippet = String(rawText || '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 600);
+  console.error(`[Model API] ${label} 失败 | HTTP ${res.status} | 响应 URL: ${url}`);
+  console.error(`[Model API] 响应片段: ${snippet}`);
+}
+
+async function parseImageResponse(res, label = 'images') {
+  const rawText = await res.text();
+  let data = {};
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    data = {};
+  }
   if (!res.ok) {
-    throw new Error(data.error?.message || data.message || `模型接口失败：${res.status}`);
+    logModelApiFailure(label, res, rawText);
+    throw new Error(modelApiErrorMessage(res.status, data, rawText));
   }
 
   const first = data.data?.[0];
@@ -146,12 +234,9 @@ function usesChatCompletionsForImage(modelName) {
   return config.model.imageModelsViaChat.includes(name);
 }
 
-async function readLocalUploadAsDataUrl(imageUrl) {
-  const filePath = parseLocalUploadPath(imageUrl);
-  const buffer = await fs.readFile(filePath);
-  const mime = getMimeType(filePath);
-  const b64 = buffer.toString('base64');
-  return `data:${mime};base64,${b64}`;
+async function readLocalUploadAsDataUrlForChat(imageUrl) {
+  const { buffer, mime } = await prepareReferenceImageForModelApi(imageUrl);
+  return `data:${mime};base64,${buffer.toString('base64')}`;
 }
 
 async function buildChatUserContent(task, promptText) {
@@ -161,13 +246,33 @@ async function buildChatUserContent(task, promptText) {
   }
   const parts = [{ type: 'text', text: promptText }];
   for (const url of refs) {
-    const dataUrl = await readLocalUploadAsDataUrl(url);
+    const dataUrl = await readLocalUploadAsDataUrlForChat(url);
     parts.push({
       type: 'image_url',
       image_url: { url: dataUrl }
     });
   }
   return parts;
+}
+
+function pickNumericOption(value) {
+  if (value == null || value === '') {
+    return undefined;
+  }
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function normalizeChatMessages(rawMessages) {
+  if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
+    return null;
+  }
+  return rawMessages
+    .filter((m) => m && typeof m === 'object' && typeof m.role === 'string' && m.content != null)
+    .map((m) => ({
+      role: m.role,
+      content: m.content
+    }));
 }
 
 function extractImageUrlFromString(text) {
@@ -253,9 +358,16 @@ async function persistChatImageResult(task, imageRef) {
 }
 
 async function parseChatCompletionResponse(res) {
-  const data = await res.json().catch(() => ({}));
+  const rawText = await res.text();
+  let data = {};
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    data = {};
+  }
   if (!res.ok) {
-    throw new Error(data.error?.message || data.message || `模型接口失败：${res.status}`);
+    logModelApiFailure('chat/completions', res, rawText);
+    throw new Error(modelApiErrorMessage(res.status, data, rawText));
   }
   const message = data.choices?.[0]?.message;
   const imageRef = extractImageFromChatMessage(message);
@@ -268,9 +380,41 @@ async function parseChatCompletionResponse(res) {
 
 async function callImageViaChatCompletions(task, promptText) {
   const model = task.imageModel || config.model.imageModel;
-  const userContent = await buildChatUserContent(task, promptText);
+  const customMessages = normalizeChatMessages(task.chatMessages);
+  const userContent = customMessages ? null : await buildChatUserContent(task, promptText);
   const { controller, timeout } = createAbortSignal();
   try {
+    const chatPayload = {
+      model,
+      messages: customMessages || [{ role: 'user', content: userContent }],
+      max_tokens: pickNumericOption(task.chatOptions?.max_tokens) || 4096,
+      stream: false
+    };
+    const temp = pickNumericOption(task.chatOptions?.temperature);
+    const topP = pickNumericOption(task.chatOptions?.top_p);
+    const freqPenalty = pickNumericOption(task.chatOptions?.frequency_penalty);
+    const presencePenalty = pickNumericOption(task.chatOptions?.presence_penalty);
+    if (temp != null) {
+      chatPayload.temperature = temp;
+    }
+    if (topP != null) {
+      chatPayload.top_p = topP;
+    }
+    if (freqPenalty != null) {
+      chatPayload.frequency_penalty = freqPenalty;
+    }
+    if (presencePenalty != null) {
+      chatPayload.presence_penalty = presencePenalty;
+    }
+    const group = (task.chatGroup || '').trim() || config.model.chatGroup;
+    if (group) {
+      chatPayload.group = group;
+    }
+    if (task.chatStreamRequested) {
+      console.log('[Model API] 检测到 stream=true 请求，为兼容当前图片结果解析逻辑已强制改为 stream=false');
+    }
+    const body = JSON.stringify(chatPayload);
+    console.log(`[Model API] POST .../chat/completions 请求体约 ${body.length} 字符`);
     const res = await fetch(getModelApiUrl('/chat/completions'), {
       method: 'POST',
       signal: controller.signal,
@@ -278,11 +422,7 @@ async function callImageViaChatCompletions(task, promptText) {
         Authorization: `Bearer ${config.model.apiKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: userContent }],
-        max_tokens: 4096
-      })
+      body
     });
     const imageRef = await parseChatCompletionResponse(res);
     return persistChatImageResult(task, imageRef);
@@ -304,7 +444,7 @@ async function callImageGenerationApi(task, prompt) {
       body: JSON.stringify(createImagePayload({ ...task, prompt }))
     });
 
-    const first = await parseImageResponse(res);
+    const first = await parseImageResponse(res, 'images/generations');
     return saveImageResult(task, first);
   } finally {
     clearTimeout(timeout);
@@ -320,7 +460,10 @@ async function callImageEditApi(task, prompt) {
   formData.append('prompt', payload.prompt);
   formData.append('n', String(payload.n));
   formData.append('response_format', payload.response_format);
-  await appendReferenceImages(formData, task.referenceImages);
+  const refBytes = await appendReferenceImages(formData, task.referenceImages);
+  console.log(
+    `[Model API] POST .../images/edits 参考图文件合计约 ${refBytes} 字节（multipart 总体会更大）；prompt 约 ${Buffer.byteLength(payload.prompt, 'utf8')} 字节`
+  );
 
   try {
     const res = await fetch(getModelApiUrl('/images/edits'), {
@@ -332,7 +475,7 @@ async function callImageEditApi(task, prompt) {
       body: formData
     });
 
-    const first = await parseImageResponse(res);
+    const first = await parseImageResponse(res, 'images/edits');
     return saveImageResult(task, first);
   } finally {
     clearTimeout(timeout);

@@ -20,7 +20,7 @@ if (!imageModelOptions.includes(defaultImageModel)) {
 const imageViaChatRaw = process.env.MODEL_IMAGE_VIA_CHAT_MODELS;
 const imageModelsViaChat = imageViaChatRaw
   ? imageViaChatRaw.split(',').map((s) => s.trim()).filter(Boolean)
-  : ['nano-banana'];
+  : ['nano-banana', 'gpt-image-2'];
 
 export const config = {
   port: Number(process.env.PORT || 3000),
@@ -28,7 +28,9 @@ export const config = {
   rootDir,
   webDir: path.resolve(rootDir, '..', 'web'),
   uploadDir: path.join(rootDir, 'uploads'),
-  dataDir: path.join(rootDir, 'data'),
+  dataDir: process.env.DATA_DIR
+    ? path.resolve(process.env.DATA_DIR)
+    : path.join(rootDir, 'data'),
   model: {
     mock: process.env.MODEL_MOCK !== 'false' || !process.env.MODEL_API_KEY,
     provider: process.env.MODEL_PROVIDER || 'openai',
@@ -36,8 +38,10 @@ export const config = {
     apiKey: process.env.MODEL_API_KEY || '',
     imageModel: defaultImageModel,
     imageModelOptions,
-    /** 这些模型走 /v1/chat/completions（与 images/generations 不同） */
+    /** 这些模型走 /v1/chat/completions（与官方 OpenAI 的 images/* 不同；聚合网关多为这种 JSON，图生图可避免 multipart 413） */
     imageModelsViaChat,
+    /** 部分网关要求在 chat 请求体中带 group，与官网 OpenAI 示例一致时可设 MODEL_CHAT_GROUP=default */
+    chatGroup: (process.env.MODEL_CHAT_GROUP || '').trim(),
     imageCount: Number(process.env.MODEL_IMAGE_N || 1),
     responseFormat: process.env.MODEL_RESPONSE_FORMAT || 'url',
     timeoutMs: Number(process.env.MODEL_TIMEOUT_MS || 300000)

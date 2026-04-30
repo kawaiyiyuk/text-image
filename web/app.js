@@ -21,6 +21,9 @@ const loginPassword = document.querySelector('#loginPassword');
 const loginError = document.querySelector('#loginError');
 const loginSubmit = document.querySelector('#loginSubmit');
 const loginHint = document.querySelector('#loginHint');
+const deepseekToggle = document.querySelector('#deepseekToggle');
+const deepseekToggleHint = document.querySelector('#deepseekToggleHint');
+const deepseekStatusChip = document.querySelector('#deepseekStatusChip');
 
 let pollingTimer = null;
 let referencePreviewUrls = [];
@@ -259,6 +262,7 @@ async function submitWebLogin() {
     if (loginUsername) {
       loginUsername.value = '';
     }
+    await loadDeepSeekStatus();
     loadHistory();
   } finally {
     loginSubmit.disabled = false;
@@ -460,6 +464,20 @@ loginPassword?.addEventListener('keydown', (e) => {
   }
 });
 
+deepseekToggle?.addEventListener('change', async () => {
+  const target = Boolean(deepseekToggle.checked);
+  deepseekToggle.disabled = true;
+  try {
+    await toggleDeepSeekEnabled(target);
+    setMessage(target ? '已开启 DeepSeek 提示词优化' : '已关闭 DeepSeek 提示词优化');
+  } catch (error) {
+    setMessage(error.message || '切换 DeepSeek 状态失败', true);
+    await loadDeepSeekStatus();
+  } finally {
+    deepseekToggle.disabled = false;
+  }
+});
+
 async function loadImageModelOptionsFromHealth() {
   if (!imageModelInput) {
     return;
@@ -483,11 +501,64 @@ async function loadImageModelOptionsFromHealth() {
   }
 }
 
+function renderDeepSeekStatus(status) {
+  if (!deepseekToggle || !deepseekToggleHint) {
+    return;
+  }
+  const enabled = Boolean(status?.enabled);
+  const requestedEnabled = Boolean(status?.requestedEnabled);
+  const available = status?.available !== false;
+  deepseekToggle.checked = requestedEnabled;
+  deepseekToggle.disabled = !available;
+  if (!available) {
+    deepseekToggleHint.textContent = '当前未配置 DeepSeek API Key，无法启用提示词优化。';
+    return;
+  }
+  deepseekToggleHint.textContent = enabled
+    ? '已开启：生成前会先用 DeepSeek 优化提示词。'
+    : '已关闭：直接使用原始提示词进行生成。';
+
+  if (deepseekStatusChip) {
+    deepseekStatusChip.classList.remove('on', 'off');
+    if (!available) {
+      deepseekStatusChip.textContent = '提示词优化状态：不可用（未配置 API Key）';
+      deepseekStatusChip.classList.add('off');
+    } else if (enabled) {
+      deepseekStatusChip.textContent = '提示词优化状态：已开启';
+      deepseekStatusChip.classList.add('on');
+    } else {
+      deepseekStatusChip.textContent = '提示词优化状态：已关闭';
+      deepseekStatusChip.classList.add('off');
+    }
+  }
+}
+
+async function loadDeepSeekStatus() {
+  if (!deepseekToggle || !deepseekToggleHint) {
+    return;
+  }
+  try {
+    const res = await request('/api/deepseek/status');
+    renderDeepSeekStatus(res.data || {});
+  } catch (error) {
+    deepseekToggleHint.textContent = error.message || '读取 DeepSeek 状态失败';
+  }
+}
+
+async function toggleDeepSeekEnabled(enabled) {
+  const res = await request('/api/deepseek/toggle', {
+    method: 'POST',
+    body: JSON.stringify({ enabled: Boolean(enabled) })
+  });
+  renderDeepSeekStatus(res.data || {});
+}
+
 (async () => {
   try {
     await loadImageModelOptionsFromHealth();
     const { blocked } = await ensureWebAuth();
     if (!blocked) {
+      await loadDeepSeekStatus();
       loadHistory();
     }
   } catch (error) {
