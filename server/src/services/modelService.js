@@ -25,6 +25,12 @@ function buildPrompt({ prompt, style, size = '1024x1024', referenceImages = [] }
   return `${prompt}\n风格要求：${stylePrompt}。\n尺寸要求：${size}。${references}`;
 }
 
+function mapSizeToDashScope(size) {
+  const s = String(size || '').trim();
+  if (s === '2048x2048' || s === '1024x1536' || s === '1536x1024') return '2K';
+  return '1K';
+}
+
 function escapeXml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -270,12 +276,45 @@ function normalizeChatMessages(rawMessages) {
   if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
     return null;
   }
+  const sanitizeContent = (content) => {
+    if (Array.isArray(content)) {
+      const cleaned = content.filter((part) => {
+        if (!part || typeof part !== 'object') {
+          return false;
+        }
+        // 透传历史消息时禁止携带 thinking 块，避免 signature 校验失败
+        if (part.type === 'thinking' || part.type === 'redacted_thinking') {
+          return false;
+        }
+        return true;
+      });
+      return cleaned.length > 0 ? cleaned : null;
+    }
+    if (typeof content === 'string') {
+      return content;
+    }
+    if (content && typeof content === 'object') {
+      if (content.type === 'thinking' || content.type === 'redacted_thinking') {
+        return null;
+      }
+      return content;
+    }
+    return null;
+  };
+
   return rawMessages
     .filter((m) => m && typeof m === 'object' && typeof m.role === 'string' && m.content != null)
-    .map((m) => ({
-      role: m.role,
-      content: m.content
-    }));
+    .map((m) => {
+      const cleanedContent = sanitizeContent(m.content);
+      if (cleanedContent == null) {
+        return null;
+      }
+      return {
+        role: m.role,
+        content: cleanedContent
+      };
+    })
+    .filter(Boolean);
 }
 
 function extractImageUrlFromString(text) {
@@ -373,9 +412,45 @@ async function parseChatCompletionResponse(res) {
     throw new Error(modelApiErrorMessage(res.status, data, rawText));
   }
   const message = data.choices?.[0]?.message;
-  const imageRef = extractImageFromChatMessage(message);
+
+  // 记录完整响应结构以辅助排查
+  console.log('[Model API] chat/completions 响应结构:', JSON.stringify({
+    id: data.id,
+    model: data.model,
+    object: data.object,
+    hasChoices: Array.isArray(data.choices),
+    choicesLength: data.choices?.length,
+    messageRole: message?.role,
+    messageContentType: Array.isArray(message?.content) ? 'array' : typeof message?.content,
+    topKeys: Object.keys(data)
+  }));
+
+  // 尝试多种方式提取图片
+  let imageRef = extractImageFromChatMessage(message);
+
+  // 部分网关在 message 层级放 images 数组
+  if (!imageRef && Array.isArray(message?.images)) {
+    for (const img of message.images) {
+      if (img?.url || img?.b64_json || img?.image_url) {
+        imageRef = img.url || img.image_url || (img.b64_json ? `data:image/png;base64,${img.b64_json}` : null);
+        if (imageRef) break;
+      }
+    }
+  }
+
+  // 部分网关使用类似 /images/generations 的 data 数组
+  if (!imageRef && Array.isArray(data.data)) {
+    for (const img of data.data) {
+      if (img?.url || img?.b64_json) {
+        imageRef = img.url || (img.b64_json ? `data:image/png;base64,${img.b64_json}` : null);
+        if (imageRef) break;
+      }
+    }
+  }
+
   if (!imageRef) {
     const preview = typeof message?.content === 'string' ? message.content.slice(0, 500) : JSON.stringify(message?.content || '').slice(0, 500);
+    console.error('[Model API] chat/completions 未解析到图片，响应全文前 2000 字符:', rawText.slice(0, 2000));
     throw new Error(`对话接口未解析到图片，返回片段：${preview}`);
   }
   return imageRef;
@@ -387,9 +462,12 @@ async function callImageViaChatCompletionsOnce(task, promptText, index = 0) {
   const userContent = customMessages ? null : await buildChatUserContent(task, promptText);
   const { controller, timeout } = createAbortSignal();
   try {
+    const systemMessage = { role: 'system', content: '你是一个图片生成模型。请根据用户的描述直接生成图片，只输出图片，不要返回文字建议、方案说明或提示词示例。如果无法生成图片，请返回包含 image_url 的响应。' };
     const chatPayload = {
       model,
-      messages: customMessages || [{ role: 'user', content: userContent }],
+      messages: customMessages
+        ? [systemMessage, ...customMessages]
+        : [systemMessage, { role: 'user', content: userContent }],
       max_tokens: pickNumericOption(task.chatOptions?.max_tokens) || 4096,
       stream: false
     };
@@ -417,7 +495,8 @@ async function callImageViaChatCompletionsOnce(task, promptText, index = 0) {
       console.log('[Model API] 检测到 stream=true 请求，为兼容当前图片结果解析逻辑已强制改为 stream=false');
     }
     const body = JSON.stringify(chatPayload);
-    console.log(`[Model API] POST .../chat/completions 请求体约 ${body.length} 字符`);
+    const userContentPreview = typeof userContent === 'string' ? userContent.slice(0, 200) : '[array content]';
+    console.log(`[Model API] POST .../chat/completions 请求体约 ${body.length} 字符，prompt 前 200 字符: ${userContentPreview}`);
     const res = await fetch(getModelApiUrl('/chat/completions'), {
       method: 'POST',
       signal: controller.signal,
@@ -505,12 +584,140 @@ async function callImageEditApi(task, prompt) {
   }
 }
 
+// ---- DashScope (阿里云百炼) ----
+
+function createDashScopeAbortSignal() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.dashscope.timeoutMs);
+  return { controller, timeout };
+}
+
+async function buildDashScopePayload(task, promptText) {
+  const content = [{ text: promptText }];
+
+  const refs = Array.isArray(task.referenceImages) ? task.referenceImages : [];
+  for (const imageUrl of refs) {
+    const dataUrl = await readLocalUploadAsDataUrlForChat(imageUrl);
+    content.push({ image: dataUrl });
+  }
+
+  const requestedN = Number.isFinite(Number(task.imageCount))
+    ? Math.trunc(Number(task.imageCount))
+    : 1;
+  const effectiveN = config.dashscope.thinkingMode
+    ? 1
+    : Math.min(Math.max(requestedN, 1), 4);
+
+  return {
+    model: task.imageModel || config.model.imageModel,
+    input: {
+      messages: [
+        { role: 'user', content }
+      ]
+    },
+    parameters: {
+      size: mapSizeToDashScope(task.size || '1024x1024'),
+      n: effectiveN,
+      watermark: false,
+      thinking_mode: config.dashscope.thinkingMode
+    }
+  };
+}
+
+async function downloadDashScopeImage(imageUrl, taskId, index = 0) {
+  const response = await fetch(imageUrl);
+  if (!response.ok) {
+    throw new Error(`下载 DashScope 图片失败：HTTP ${response.status}`);
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const outputDir = path.join(config.uploadDir, 'generated');
+  await fs.mkdir(outputDir, { recursive: true });
+  const suffix = index > 0 ? `-${index + 1}` : '';
+  const fileName = `${taskId}${suffix}.png`;
+  await fs.writeFile(path.join(outputDir, fileName), buffer);
+  return `/uploads/generated/${fileName}`;
+}
+
+async function callDashScopeApi(task, promptText) {
+  const payload = await buildDashScopePayload(task, promptText);
+  const url = `${config.dashscope.apiBase.replace(/\/$/, '')}/generation`;
+  const { controller, timeout } = createDashScopeAbortSignal();
+
+  try {
+    const body = JSON.stringify(payload);
+    console.log(`[DashScope] POST ${url}, model=${payload.model}, size=${payload.parameters.size}, n=${payload.parameters.n}`);
+
+    const res = await fetch(url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${config.dashscope.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body
+    });
+
+    const rawText = await res.text();
+    let data = {};
+    try { data = JSON.parse(rawText); } catch { /* keep empty */ }
+
+    if (!res.ok) {
+      const errMsg = data?.message || data?.code
+        ? `DashScope: ${data.message || data.code}`
+        : `DashScope API 返回 HTTP ${res.status}`;
+      console.error(`[DashScope] 请求失败 | HTTP ${res.status} | ${rawText.slice(0, 600)}`);
+      throw new Error(errMsg);
+    }
+
+    const choices = data?.output?.choices;
+    if (!Array.isArray(choices) || choices.length === 0) {
+      console.error('[DashScope] 响应中无 choices:', JSON.stringify(data).slice(0, 1000));
+      throw new Error('DashScope 未返回图片数据');
+    }
+
+    const imageUrls = [];
+    for (const choice of choices) {
+      const msgContent = choice?.message?.content;
+      if (!Array.isArray(msgContent)) continue;
+      const imagePart = msgContent.find((c) => c && c.image);
+      if (imagePart?.image) {
+        imageUrls.push(imagePart.image);
+      }
+    }
+
+    if (imageUrls.length === 0) {
+      throw new Error('DashScope 响应中未找到图片 URL');
+    }
+
+    console.log(`[DashScope] 获取到 ${imageUrls.length} 张图片，开始下载到本地...`);
+
+    const localUrls = await Promise.all(
+      imageUrls.map((url, i) => downloadDashScopeImage(url, task.id, i))
+    );
+
+    return localUrls;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function generateImageDashScope(task, promptText) {
+  const localUrls = await callDashScopeApi(task, promptText);
+  return {
+    imageUrl: localUrls[0] || '',
+    imageUrls: localUrls,
+    enhancedPrompt: promptText
+  };
+}
+
+// ---- generateImage ----
+
 export async function generateImage(task) {
   if (config.model.mock) {
     return createMockImage(task, path.join(config.uploadDir, 'generated'));
   }
 
-  if (config.model.provider !== 'openai') {
+  if (config.model.provider !== 'openai' && config.model.provider !== 'dashscope') {
     throw new Error(`暂不支持的模型提供方：${config.model.provider}`);
   }
 
@@ -524,6 +731,10 @@ export async function generateImage(task) {
   console.log(`[DeepSeek] 参考图数量：${task.referenceImages?.length || 0}`);
   console.log(`[DeepSeek] 原始提示词：\n${task.prompt}`);
   console.log(`[DeepSeek] 优化后提示词：\n${enhancedPrompt}`);
+
+  if (config.model.provider === 'dashscope') {
+    return generateImageDashScope(task, enhancedPrompt);
+  }
 
   const modelName = task.imageModel || config.model.imageModel;
   if (usesChatCompletionsForImage(modelName)) {

@@ -38,7 +38,7 @@
         <form class="panel" id="generateForm">
           <div class="field">
             <label for="prompt">图片描述</label>
-            <textarea id="prompt" maxlength="800" placeholder="例如：一只穿宇航服的橘猫站在月球上，电影感灯光，细节丰富"></textarea>
+            <textarea id="prompt" maxlength="5000" placeholder="例如：一只穿宇航服的橘猫站在月球上，电影感灯光，细节丰富"></textarea>
           </div>
 
           <div class="grid">
@@ -56,9 +56,12 @@
             <div class="field">
               <label for="size">尺寸</label>
               <select id="size">
-                <option value="1024x1024">方图 1024x1024</option>
-                <option value="1024x1536">竖图 1024x1536</option>
-                <option value="1536x1024">横图 1536x1024</option>
+                <option value="1024x1024">方图 1:1 (1024x1024)</option>
+                <option value="1088x1440">竖版 3:4 (1088x1440)</option>
+                <option value="1088x1920">手机全屏 9:16 (1088x1920)</option>
+                <option value="1024x1536">竖图 2:3 (1024x1536)</option>
+                <option value="1536x1024">横图 3:2 (1536x1024)</option>
+                <option value="1920x1088">手机横屏 16:9 (1920x1088)</option>
               </select>
             </div>
 

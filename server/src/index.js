@@ -85,7 +85,7 @@ function resolveImageCountForRequest(body, fallbackCount) {
 }
 
 function resolveImageSizeForRequest(body, fallbackSize) {
-  const allowed = new Set(['1024x1024', '1024x1536', '1536x1024', '2048x2048']);
+  const allowed = new Set(['1024x1024', '1024x1536', '1536x1024', '2048x2048', '1088x1440', '1088x1920', '1920x1088']);
   const raw = body?.size;
   const normalized = raw != null ? String(raw).trim() : '';
   if (allowed.has(normalized)) {

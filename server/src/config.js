@@ -53,6 +53,12 @@ export const config = {
     model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
     timeoutMs: Number(process.env.DEEPSEEK_TIMEOUT_MS || 60000)
   },
+  dashscope: {
+    apiBase: process.env.DASHSCOPE_API_BASE || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation',
+    apiKey: process.env.DASHSCOPE_API_KEY || '',
+    thinkingMode: process.env.DASHSCOPE_THINKING_MODE !== 'false',
+    timeoutMs: Number(process.env.DASHSCOPE_TIMEOUT_MS || 300000)
+  },
   /** 网页登录固定账号（写死在配置中，生产环境请自行评估风险） */
   auth: {
     username: 'wanghaiou',
