@@ -733,6 +733,12 @@ export async function generateImage(task) {
   console.log(`[DeepSeek] 优化后提示词：\n${enhancedPrompt}`);
 
   if (config.model.provider === 'dashscope') {
+    const modelName = task.imageModel || config.model.imageModel;
+    if (!config.dashscope.validModels.includes(modelName)) {
+      const fallback = config.dashscope.validModels[0];
+      console.warn(`[Model] 模型 "${modelName}" 不适用于 DashScope，自动切换为 ${fallback}`);
+      task = { ...task, imageModel: fallback };
+    }
     return generateImageDashScope(task, enhancedPrompt);
   }
 
